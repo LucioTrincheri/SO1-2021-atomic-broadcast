@@ -1,0 +1,26 @@
+Cada nodo N tiene las siguientes variables:
+
+- A: mayor número de secunecia acordado.
+- P: mayor número de secuencia propuesto.
+
+Nombres acordados:
+    Emisor (E)
+    Mensaje (M)
+    Identificador (I) (Como se genera?)
+
+Implementación: 
+-1) El nodo emisor (E) envia al resto un mensaje {M, I}.
+    Este mensaje {M, I} se lo guarda para luego, poder calcular D
+    mediante los valores P y el identificador del mensaje.
+-2) Cada nodo realiza lo siguiente:
+    - Calcula el nuevo valor P = max(A, P) + 1.
+    - Asigna al mensaje (M) el nuevo P.
+    - Se coloca en la cola de retención, ordenada por este valor P. {M, I, P, estado = prov}
+    - Luego de esto, envia el valor P actualizado a (E).
+-3) El nodo emisor (E) genera el número definitivo (llamado D) de orden para el mensaje (M).
+    Este número es enviado al resto de los nodos junto con el identificador {D,I}.
+    Ahora, cada nodo que recive la tupla realiza lo siguiente:
+    - Actualiza su valor A = max(A, D)
+    - Reemplaza el valor P con D en mensaje de la cola {M, I, P, estado = prov} -> {M, I, D, estado = acor}.
+    - Reordena la lista según este nuevo valor D si es que D =/= P.
+    - Si el 1er valor de la cola tiene "estado = acor", entonces se entrega.
