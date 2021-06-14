@@ -2,7 +2,7 @@
 %% Funciones de control
 -export([start/0, stop/0]).
 %% Librería de acceso.
--export([broadcast/1, get/0]).
+-export([broadcast/1, pop/0]).
 -export([isisLoop/3, pqueue/1, processNA/1]).
 -export([tracker/4]).
 -define(TIEMPO, 2000).
@@ -24,11 +24,13 @@ stop()->
     unregister(receiver),
     ok.
 
-get() ->
-    queue ! {get, self()},
-    ?Dbg("[Get]: Esperando mensaje...~n"),
+pop() ->
+    queue ! {pop, self()},
+    %%?Dbg("[Pop]: Esperando mensaje...~n"),
     receive
-        noMsgs -> io:format("No hay mensajes nuevos~n");
+        noMsgs -> 
+            %io:format("No hay mensajes nuevos~n"),
+            noMsgs;
         
         {Msg, _, _, _} -> Msg
     end.
@@ -89,7 +91,7 @@ pqueue(L) ->
             pqueue(lists:keyreplace(I, 2, L, {Msg, I, NA, acord}));
 
         % Si es posible, realiza un pop en la queue.
-        {get, Pid} ->
+        {pop, Pid} ->
             case L of
                 [] -> 
                     Pid ! noMsgs,
@@ -103,7 +105,7 @@ pqueue(L) ->
                             pqueue(lists:delete(First, L));
                         {_,_,_,prov} -> %TODO tal vez hacer un wait
                             ?Dbg("[pqueue]: Primer mensaje con estado prov reitero~n"),
-                            self() ! {get, Pid},
+                            self() ! {pop, Pid},
                             pqueue(L)
                     end
             end;
