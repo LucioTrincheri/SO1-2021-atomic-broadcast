@@ -5,9 +5,16 @@
 -export([broadcast/1, pop/0]).
 -export([isisLoop/3, pqueue/1, processNA/1]).
 -export([tracker/4]).
+-export([numberLength/1]).
 -define(TIEMPO, 2000).
 -define(Dbg(Str),io:format("[DBG]~p:" ++ Str,[?FUNCTION_NAME])).
 -define(Dbg(Str,Args),io:format("[DBG]~p:" ++ Str,[?FUNCTION_NAME|Args])).
+
+%! Puede no llegar en orden los mensajes. Vamos a tener que 
+%! reenviar los mensajes acordados a los nodos que nunca nos
+%! propuso un valor de prioridad. Puede ser necesario que una
+%! vez acordado el valor, esperar a que tu valor interno 
+%! corresponda con el de tu mensaje enviar (llegaron los anteriores)
 
 start() ->
     register(loop, spawn(?MODULE, isisLoop, [0,0,0])),
@@ -23,6 +30,25 @@ stop()->
     unregister(queue),
     unregister(receiver),
     ok.
+
+numberLength(N) ->
+    case N - floor(N / 10) * 10 of
+        0 -> 0;
+        _ -> 1 + numberLength(floor(N / 10))
+    end.
+
+pid_tokens(Pid) ->
+    PidStr = pid_to_list(Pid),
+    PidStr1 = lists:sublist(PidStr, 2, length(PidStr)-2),
+    [N, S, _] = [list_to_integer(T) || T <- string:tokens(PidStr1,[$.])],
+    erlang:list_to_integer(lists:concat([N, S])).
+
+fnpiCalculate(NP, FS) ->
+    NPI = (FS * math:pow(10, -1 * numberLength(FS))),
+    %FNPI = NP + erlang:list_to_float(lists:nth(1, io_lib:format("~.6f",[NPI]))),
+    FNPI = NP + floor(NPI * 100000) / 100000,
+    ?Dbg("[fnpiCalculate]: Valor FNPI: ~p~n", [FNPI]),
+    FNPI.
 
 pop() ->
     queue ! {pop, self()},
@@ -40,7 +66,6 @@ broadcast(Msg) ->
     ?Dbg("[Broadcast]: Peticion de broadcast enviada a isisLoop~n"),
     ok.
 
-
 tracker(Msg, I, P, []) ->
     ?Dbg("[Traker]: Recibí respuesta de todos. Nro de orden final: ~p~n", [P]),
     receiver ! {endNA, Msg, I, P};
@@ -49,10 +74,10 @@ tracker (Msg, I, P, Nodes) ->
         {updateNA, NP, Node} -> 
             ?Dbg("[Traker]: Recibí respuesta de ~p. Nro de orden: ~p~n", [Node, NP]),
             tracker(Msg, I, erlang:max(P, NP), lists:delete(Node, Nodes))
-    after 
-        ?TIEMPO ->
-            ?Dbg("[Traker]: Tiempo de espera agotado, retorno ~p~n", [P]),
-            receiver ! {endNA, Msg, I, P}
+    %%after 
+    %%    ?TIEMPO ->
+    %%        ?Dbg("[Traker]: Tiempo de espera agotado, retorno ~p~n", [P]),
+    %%        receiver ! {endNA, Msg, I, P}
     end.
 
 % Lista de mensajes que deben esperar respuestas nodos (numeros provisorio) 
@@ -104,7 +129,7 @@ pqueue(L) ->
                             Pid ! First,
                             pqueue(lists:delete(First, L));
                         {_,_,_,prov} -> %TODO tal vez hacer un wait
-                            ?Dbg("[pqueue]: Primer mensaje con estado prov reitero~n"),
+                            %?Dbg("[pqueue]: Primer mensaje con estado prov reitero~n"),
                             self() ! {pop, Pid},
                             pqueue(L)
                     end
@@ -126,17 +151,20 @@ isisLoop (A, P, N) ->
             queue ! {store, Msg, I, P},
             receiver ! {generateMsg, Msg, I, P, nodes()},
             lists:foreach(fun (X) ->
-                          {loop, X} ! {reqNP, Msg, I, node()} end,
+                          {loop, X} ! {reqNP, Msg, I, node(), self()} end,
                           nodes()),
             isisLoop(A, P, N + 1);
         
         % Dado un nuevo mensaje, lo guarda en la queue
         % y responde al emisor el numero provisorio
-        {reqNP, Msg, I, Node} -> 
-            ?Dbg("[isisLoop | reqNP]: Pedido de nuevo valor P: ~p de nodo: ~p~n", [P, Node]),
+        {reqNP, Msg, I, Node, PId} -> 
             NP = erlang:max(A, P) + 1,
-            queue ! {store, Msg, I, NP},
-            {receiver, Node} ! {calculateNA, I, NP, node()},
+            ?Dbg("[isisLoop | reqNP]: Voy a responder con valor P: ~p de nodo: ~p~n", [NP, Node]),
+            FS = pid_tokens(PId),
+            FNPI = fnpiCalculate(NP, FS),
+            ?Dbg("[isisLoop | reqNP]: Valor final NP es: ~p de nodo: ~p~n", [FNPI, Node]),
+            queue ! {store, Msg, I, FNPI},
+            {receiver, Node} ! {calculateNA, I, FNPI, node()},
             isisLoop(A, NP, N);
 
         % Dado el numero definitivo calculado por el 
@@ -148,13 +176,14 @@ isisLoop (A, P, N) ->
             lists:foreach(fun (X) ->
                           {loop, X} ! {updNA, Msg, I, NA} end,
                           nodes()),
-            isisLoop(erlang:max(A, NA), P, N);
+            ?Dbg("[isisLoop | recNA]: Valor floor NA: ~p~n", [floor(NA)]),
+            isisLoop(erlang:max(A, floor(NA)), P, N);
 
         % Actualiza el valor acordado en la queue y en el nodo 
         {updNA, Msg, I, NA} ->
             ?Dbg("[isisLoop | updNA]: Recibi update valor final para mensaje: ~p, con valor ~p~n", [Msg, NA]),
             queue ! {update, Msg, I, NA},
-            isisLoop(erlang:max(A, NA), P, N);
+            isisLoop(erlang:max(A, floor(NA)), P, N);
         
         fin -> ok
     end.
