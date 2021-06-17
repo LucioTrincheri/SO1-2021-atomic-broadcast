@@ -2,8 +2,8 @@
 %% Funciones de control
 -export([start/0, stop/0]).
 %% Librería de acceso.
--export([append/1, get/0]).
--export([listPending/1, clientCounter/1, ledgerLoop/1]).
+-export([ledgerAppend/1, ledgerGet/0]).
+-export([listPending/1, clientCounter/1, ledgerLoop/1, aliveCounter/1]).
 
 -define(TIEMPO, 2000).
 
@@ -13,6 +13,7 @@
 start() ->
     ?Dbg("Inicializando...~n"),
     isis:start(),
+    register(alive, spawn(?MODULE, aliveCounter, [(lists:length(nodes()) / 2) - 1])), %Tomo la mitad de nodos iniciales como el f de parada.
     register(appendPend, spawn(?MODULE, listPending, [[]])),
     register(getPend, spawn(?MODULE, listPending, [[]])),
     register(counter, spawn(?MODULE, clientCounter, [0])),
@@ -29,14 +30,26 @@ stop()->
     unregister(getPend),
     unregister(counter),
     unregister(ledger),
+    unregister(alive),
     ok.
+
+
+aliveCounter(F) ->
+    L = lists:length(nodes()),
+    case ((L =< F) or (L =< 1)) of
+        true ->
+            ?Dbg("La red se quedo vacia como yo sin ella...muriendo :_c~n"),
+            stop();
+        false -> aliveCounter(F)
+    end.
 
 clientCounter(C) ->
     receive
         {get, PId} ->
-            PId ! C + 1,
+            PId ! C,
+            clientCounter(C);
+        incr ->
             clientCounter(C + 1);
-        
         fin -> ok
     end.
 
@@ -60,30 +73,39 @@ borrarInbox() ->
         0 -> ok
     end.
 
-get() ->
+ledgerGet() ->
     counter ! {get, self()},
     receive
+        {_,_,_} -> 
+            ledgerGet();
         C ->
+            counter ! incr,
+            B = C + 1,
             lists:foreach(fun (X) ->
-                          {ledger, X} ! {reqGet, C, self()} end,
+                          {ledger, X} ! {reqGet, B, self()} end,
                           nodes()++[node()]),
             receive
-                {getRes, C, V} -> %% TODO si nadie responde dentro de mucho tiempo asumo que estoy muerto, muero.
+                {getRes, B, V} -> %% TODO si nadie responde dentro de mucho tiempo asumo que estoy muerto, muero.
                     borrarInbox(),
                     V
             end
     end.
 
-append(Msg) ->
+ledgerAppend(Msg) ->
     counter ! {get, self()},
     receive
+        % Si un mensaje llego despues de limpiar la inbox pero antes de una nueva llamada a append.
+        {_,_,_} -> 
+            ledgerAppend(Msg);
         C ->
+            counter ! incr,
+            B = C + 1,
             lists:foreach(fun (X) ->
-                          {ledger, X} ! {reqAppend, C, Msg, self()} end,
+                          {ledger, X} ! {reqAppend, B, Msg, self()} end,
                           nodes()++[node()]),
             receive
-                {appendRes, C, Response} -> %% TODO si nadie responde dentro de mucho tiempo asumo que estoy muerto, muero.
-                    borrarInbox(),
+                {appendRes, B, Response} -> %% TODO si nadie responde dentro de mucho tiempo asumo que estoy muerto, muero.
+                    borrarInbox(), % Para seguir la idea de implementacion (aunque no sea necesario), se borran los mensajes que no nos importan
                     Response
             end
     end.
@@ -123,23 +145,3 @@ ledgerLoop(Hist) ->
                 end
         end
     end.
-
-%! Problema ISIS
-% ISIS -> Si dos nodos con valor interno 0 mandan un mensaje exactamente al mismo momento, ambos terminan con valor 1 como final de mensaje. Solucionar.
-% Se puede solucionar el problema poniendo el PId como parte decimal del valor del mensaje.
-% Ejemplos: P1 -> PId = 15, P2 -> PId = 20.
-% Ambos mandan su mensaje, ambos asignan 1 como valor.
-% Cuando te llega el mensaje, ambos tiene 1 como NA.
-% Agregas tu PId como parte decimal. Ahora los mensajes tienen valor
-% 1,15 y 1,20. Ambos estan ordenados. Respondo a todos los nodos.
-% Para actualizar tu A, haces max(A, floor(NA)). Todo 10 punto.
-
-%? Tema valor f de parada
-% Para el valor f de fallo < n/2, n lo podemos sacar de la siguiente manera:
-% Sabemos que cuando comienzan los ledger (y por lo tanto is-is), todos
-% los nodos que van a formar parte de la red ya tienen nombre.
-% Por lo tanto, es posible saber la cantidad iniciar con length(nodes()) / 2.
-% Guardar este valor en alguna parte (agente que monitoree los servidores.
-% Si se cae alguno resta 1. Este agente devulve si es posible seguir
-% operando. Si luego de la resta la cantidad queda por debajo o igual a f,
-% devulve false; en caso contrario devuelve true.
