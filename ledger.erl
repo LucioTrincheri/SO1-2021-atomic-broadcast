@@ -11,9 +11,8 @@
 -define(Dbg(Str,Args),io:format("[DBG]~p:" ++ Str,[?FUNCTION_NAME|Args])).
 
 start() ->
-    ?Dbg("Inicializando...~n"),
     isis:start(),
-    register(alive, spawn(?MODULE, aliveCounter, [(lists:length(nodes()) / 2) - 1])), %Tomo la mitad de nodos iniciales como el f de parada.
+    register(alive, spawn(?MODULE, aliveCounter, [((length(nodes()) + 1) / 2)])), %Tomo la mitad de nodos iniciales como el f de parada.
     register(appendPend, spawn(?MODULE, listPending, [[]])),
     register(getPend, spawn(?MODULE, listPending, [[]])),
     register(counter, spawn(?MODULE, clientCounter, [0])),
@@ -35,13 +34,13 @@ stop()->
 
 
 aliveCounter(F) ->
-    L = lists:length(nodes()),
-    case ((L =< F) or (L =< 1)) of
+    L = length(nodes()) + 1,
+    case ((L < F) or (L =< 1)) of
         true ->
-            ?Dbg("La red se quedo vacia como yo sin ella...muriendo :_c~n"),
+            ?Dbg("La red se quedo vacia como yo sin ella...muriendo :_c~p~n", [F]),
             stop();
         false -> aliveCounter(F)
-    end.
+    end. 
 
 clientCounter(C) ->
     receive
