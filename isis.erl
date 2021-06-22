@@ -3,21 +3,21 @@
 -export([start/0, stop/0]).
 %% Librería de acceso.
 -export([broadcast/1, pop/0]).
+%% Funciones internas del programa, en orden de dependencias.
 -export([isisLoop/3, pqueue/1, processNA/1]).
 -export([tracker/4, ordFun/2]).
-
+%% Función auxiliar para testing.
 -export([p/1]).
 
+% Constante de tiempo tras la cual se procede a verificar los nodos vivos. 
 -define(TIEMPO, 100).
 -define(Dbg(Str),io:format("[DBG]~p:" ++ Str,[?FUNCTION_NAME])).
 -define(Dbg(Str,Args),io:format("[DBG]~p:" ++ Str,[?FUNCTION_NAME|Args])).
 
-%! Puede ser necesario que una
-%! vez acordado el valor, esperar a que tu valor interno 
-%! corresponda con el de tu mensaje enviar (llegaron los anteriores)
-
+% Función auxiliar para hacer testing con muchos nodos.
 p(X) -> net_adm:ping(list_to_atom(X)).
 
+% start | stop: encargadas de comenzar y detener los agentes.
 start() ->
     register(loop, spawn(?MODULE, isisLoop, [0,0,0])),
     register(queue, spawn(?MODULE, pqueue, [[]])),
@@ -33,6 +33,8 @@ stop()->
     unregister(receiver),
     ok.
 
+% Funcion encargada de retirar el primer mensaje de la lista de
+% mensajes. En caso que no haya mensajes, retorna un átomo acorde.
 pop() ->
     queue ! {pop, self()},
     %%?Dbg("[Pop]: Esperando mensaje...~n"),
@@ -43,10 +45,18 @@ pop() ->
         {Msg, _, _, _, _} -> Msg
     end.
 
+% Función accesible por el usuario. Envía al loop un pedido de broadcast.
 broadcast(Msg) ->
     loop ! {getNP, Msg},
     ok.
 
+% Agente invocado por processNA, encargado de monitorear
+% un mensaje en específico. Por cada mensaje que recibe,
+% actualiza el valor de prioridad y remueve el nodo emisor
+% de la lista de mensajes. En el caso que no haya mas nodos
+% a esperar, devuelve el resultado final de prioridad P.
+% Por otra parte, se encarga de fijarse que los nodos a los
+% que se esta esperando estan vivos. En caso contrario, los elimina.
 tracker(Msg, I, P, []) ->
     receiver ! {endNA, Msg, I, P};
 tracker(Msg, I, P, Nodes) ->
@@ -59,9 +69,10 @@ tracker(Msg, I, P, Nodes) ->
             tracker(Msg, I, P, lists:filter(fun(Nodo) -> lists:member(Nodo, nodes()) end, Nodes))
     end.
 
-% Lista de mensajes que deben esperar respuestas nodos (numeros provisorio) 
-% tal vez la lista tenga asociado al mensaje un pid del agente encargado del conteo.
-% L mapa de K:I {AgentePid}
+% Agente que se encarga de invocar y destruir agentes, los cuales 
+% se encargar de monitorear las respuestas de valor prioridad
+% relacionadas a cada mensaje (1 mensaje monitoreado por agente)
+% Ademas, redirecciona mensajes de prioridad a su agente correspondiente. 
 processNA(L) ->
     receive
         {generateMsg, Msg, I, P, Nodes} ->
@@ -81,7 +92,10 @@ processNA(L) ->
             ok
     end.
 
-
+% Función de ordenamiento de mensajes. Toma al valor P como primer
+% valor para decidir el orden. Ante una igualdad (que se puede dar
+% cuando dos nodos envian un mensaje en el mismo momento), decide
+% el orden mediante el nombre del nodo emisor del mensaje original.
 ordFun({_, _, P1, Node1, _}, {_, _, P2, Node2, _}) -> 
     case P1 < P2 of
         true -> true;
@@ -92,6 +106,9 @@ ordFun({_, _, P1, Node1, _}, {_, _, P2, Node2, _}) ->
             end
     end.
 
+% Lista encargada de almacenar los mensajes con sus
+% estados, actualizar los valores de prioridad de 
+% los mismos y devolver mensajes si es pedido. 
 pqueue(L) ->
     receive
         % Guarda un mensaje con un valor provisorio.
@@ -100,8 +117,14 @@ pqueue(L) ->
 
         % Actualiza el mensaje con un valor acordado. 
         {update, Msg, I, NA} -> 
-            {_, _, _, NodeO, prov} = lists:keyfind(I, 2, L),
-            pqueue(lists:keyreplace(I, 2, L, {Msg, I, NA, NodeO, acord}));
+            case lists:keyfind(I, 2, L) of %! Ver que tan legal es esta linea. Sino reemplazar por '%?'.
+                {_, _, _, NodeO, prov} -> 
+                    pqueue(lists:keyreplace(I, 2, L, {Msg, I, NA, NodeO, acord}));
+                false -> 
+                    pqueue(L)
+            end
+            %? {_, _, _, NodeO, prov} = lists:keyfind(I, 2, L),
+            %? pqueue(lists:keyreplace(I, 2, L, {Msg, I, NA, NodeO, acord}));
 
         % Si es posible, realiza un pop en la queue.
         {pop, Pid} ->
@@ -125,6 +148,13 @@ pqueue(L) ->
         fin -> ok
     end.
 
+%! Bug: Si un nodo manda un mensaje solicitando numeros de prioridad, y muere antes de que les pueda
+%! responder con el valor final, ese mensaje provisorio queda en la queue. Los nodos nunca van a seguir.
+%TODO Sobre esto hay que arreglar dos situaciones: 
+    %TODO -> El nodo emisor manda, muere antes de que lleguen respuestas. Todos tienen un mensaje provisorio.
+    %TODO -> El nodo emisor manda los valores finales. Mientra los manda muere. Algunos tiene valor acordado.
+
+%! Sigo buscando problemas.
 isisLoop (A, P, N) ->
     receive
         % Dado el identificador del nuevo mensaje y los 
@@ -135,7 +165,6 @@ isisLoop (A, P, N) ->
             IOList = io_lib:format("~w", [node()]),
             FlattenList = lists:flatten(IOList),
             I = FlattenList ++ integer_to_list(N),
-            % Puede llegar en alguna ocasion ser necesario aumentar el P. Si es necesario, no sabemos.
             queue ! {store, Msg, I, P, node()},
             receiver ! {generateMsg, Msg, I, P, nodes()},
             lists:foreach(fun (X) ->
@@ -152,17 +181,17 @@ isisLoop (A, P, N) ->
             isisLoop(A, NP, N);
 
         % Dado el numero definitivo calculado por el 
-        % agente actualiza el valor de la queue y del
-        % nodo y manda este nuevo valor a los nodos.
+        % agente actualiza el valor de la queue y 
+        % manda este nuevo valor a los nodos.
         {recNA, Msg, I, NA} ->
             queue ! {update, Msg, I, NA},
             lists:foreach(fun (X) ->
                           {loop, X} ! {updNA, Msg, I, NA} end,
-                          nodes()),
+                          nodes()), % TODO Creo que arreglado: Problema. Tendriamos que hacer que si un nodo recibe una actualizacion, no se rompa si el mensaje no existe en su queue.
             isisLoop(erlang:max(A, NA), P, N);
 
-        % Actualiza el valor acordado en la queue y en el nodo 
-        {updNA, Msg, I, NA} ->
+        % Actualiza el valor acordado en la queue.
+        {updNA, Msg, I, NA} -> %! Para arreglar el bug, puede ser necesario checkear si el que me mando el mensaje esta muerto. Si lo esta, reenvio a nodos. Si no lo esta, sigo normal.
             queue ! {update, Msg, I, NA},
             isisLoop(erlang:max(A, NA), P, N);
         

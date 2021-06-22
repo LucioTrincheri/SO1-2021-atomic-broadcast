@@ -136,7 +136,9 @@ ledgerLoop(Hist) ->
             {reqAppend, C, Msg, PId} ->
                 appendPend ! {find, C, PId, self()},
                 receive
-                    true -> % En este caso, si esta contained, no hay posibildid que ya se haya guardado el mensaje en el historial. Hacemos todo en 1 receive
+                    % En este caso, si esta en los pendientes, no hay posibilidad
+                    % que ya se haya guardado el mensaje en el historial.
+                    true ->
                         PId ! {appendRes, C, ok},
                         appendPend ! {remove, C, PId},
                         ledgerLoop([Msg] ++ Hist);
