@@ -6,16 +6,11 @@
 %% Funciones internas del programa, en orden de dependencias.
 -export([isisLoop/3, pqueue/1, processNA/1]).
 -export([tracker/4, ordFun/2]).
-%% Función auxiliar para testing.
--export([p/1]).
 
 % Constante de tiempo tras la cual se procede a verificar los nodos vivos. 
 -define(TIEMPO, 100).
 -define(Dbg(Str),io:format("[DBG]~p:" ++ Str,[?FUNCTION_NAME])).
 -define(Dbg(Str,Args),io:format("[DBG]~p:" ++ Str,[?FUNCTION_NAME|Args])).
-
-% Función auxiliar para hacer testing con muchos nodos.
-p(X) -> net_adm:ping(list_to_atom(X)).
 
 % start | stop: encargadas de comenzar y detener los agentes.
 start() ->
@@ -122,7 +117,7 @@ pqueue(L) ->
                     pqueue(lists:keyreplace(I, 2, L, {Msg, I, NA, NodeO, acord}));
                 false -> 
                     pqueue(L)
-            end
+            end;
             %? {_, _, _, NodeO, prov} = lists:keyfind(I, 2, L),
             %? pqueue(lists:keyreplace(I, 2, L, {Msg, I, NA, NodeO, acord}));
 
@@ -136,13 +131,34 @@ pqueue(L) ->
                     Ord = lists:sort(fun ordFun/2, L),
                     First = lists:nth(1, Ord),
                     case First of
+                        % En el caso que solo le haya llegado la confirmacion a algunos
+                        % de los nodos, el ISIS queda en un estado inconsistente.
                         {_,_,_,_,acord} ->
+                            % Si el primer mensaje tiene valor acordado, lo devuelvo.
                             Pid ! First,
                             pqueue(lists:delete(First, Ord));
-                        {_,_,_,_,prov} -> %TODO tal vez hacer un wait
-                            %?Dbg("[pqueue]: Primer mensaje con estado prov reitero~n"),
-                            self() ! {pop, Pid},
-                            pqueue(Ord)
+                        {_,_,_,Node,prov} ->
+
+                            % Si el primer mensaje no tiene valor acordado, compruebo
+                            % el estado de liveness del nodo emisor del mismo.
+                            case lists:member(Node, nodes()) of
+                                % Si esta vivo sigo esperando respuesta.
+                                true -> 
+                                    self() ! {pop, Pid},
+                                    pqueue(Ord);
+                                % Si esta muerto borro el mensaje de la queue. Fijarse si algun nodo de la red tiene el numero de orden acordado,
+                                % si lo tiene me lo da y se lo pongo. UwU
+                                false ->
+                                    self() ! {pop, Pid},
+                                    pqueue(lists:delete(First, Ord))
+                                %! Es posible arreglar el 3er caso si hacemos que antes de borrar el mensaje
+                                %! le preguntamos al resto de los nodos de la red el estado del mensaje.
+                                %! Si alguno responde con acordado devuelve el valor. Para esto tendriamos
+                                %! que implementar una queue que sea el historial de mensajes popeados.
+
+                                %! El problema de esto es que puede que el historial de mensajes popeados se vuelva 
+                                %! muuuy largo.
+                            end
                     end
             end;
         fin -> ok
