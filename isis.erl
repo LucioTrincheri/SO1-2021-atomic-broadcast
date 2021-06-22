@@ -5,10 +5,11 @@
 -export([broadcast/1, pop/0]).
 %% Funciones internas del programa, en orden de dependencias.
 -export([isisLoop/3, pqueue/1, processNA/1]).
--export([tracker/4, ordFun/2]).
+-export([tracker/4, ordFun/2, accordedTracker/4]).
 
 % Constante de tiempo tras la cual se procede a verificar los nodos vivos. 
 -define(TIEMPO, 100).
+-define(TIEMPO_A_ESPERAR, 300).
 -define(Dbg(Str),io:format("[DBG]~p:" ++ Str,[?FUNCTION_NAME])).
 -define(Dbg(Str,Args),io:format("[DBG]~p:" ++ Str,[?FUNCTION_NAME|Args])).
 
@@ -17,25 +18,26 @@ start() ->
     register(loop, spawn(?MODULE, isisLoop, [0,0,0])),
     register(queue, spawn(?MODULE, pqueue, [[]])),
     register(receiver, spawn(?MODULE, processNA, [maps:new()])),
+    register(accorded, spawn(?MODULE, accordedTracker, [[], [], 0, 0])),
     ok.
 
 stop()->
     loop ! fin,
     queue ! fin,
     receiver ! fin,
+    accorded ! fin,
     unregister(loop),
     unregister(queue),
     unregister(receiver),
+    unregister(accorded),
     ok.
 
 % Funcion encargada de retirar el primer mensaje de la lista de
 % mensajes. En caso que no haya mensajes, retorna un átomo acorde.
 pop() ->
     queue ! {pop, self()},
-    %%?Dbg("[Pop]: Esperando mensaje...~n"),
     receive
         noMsgs -> 
-            %io:format("No hay mensajes nuevos~n"),
             noMsgs;
         {Msg, _, _, _, _} -> Msg
     end.
@@ -83,7 +85,8 @@ processNA(L) ->
             processNA(maps:remove(I, L));
         
         fin -> 
-            maps:map((fun(_, V)-> V ! fin end), L), % Matamos a todos los trackers vivos.
+            % Matamos a todos los trackers vivos.
+            maps:map((fun(_, V)-> V ! fin end), L),
             ok
     end.
 
@@ -101,6 +104,76 @@ ordFun({_, _, P1, Node1, _}, {_, _, P2, Node2, _}) ->
             end
     end.
 
+% Historial de mensajes que ya fue acordado.
+% Además se encarga de devolver el estado en común de un mensaje de la red.
+% La idea y para que se realizo se detallará en el informe ya que es densa la explicación. 
+accordedTracker(L, Nodes, I, PId) ->
+    receive
+        % Recibe una nueva solicitud de computar el estado común de un mensaje.
+        {computeStatus, PId, Imsg} ->
+            lists:foreach(fun (X) ->
+                          {accorded, X} ! {reqStatus, Imsg, node()} end,
+                          nodes()),
+            accordedTracker(L, nodes(), Imsg, PId);
+
+        % Pedido de estado de un mensaje en específico.
+        {reqStatus, Imsg, Node} ->
+            case lists:keyfind(Imsg, 1, L) of
+                {_, P} -> 
+                    {accorded, Node} ! {msgStatus, acord, P, Imsg};
+                false -> 
+                    {accorded, Node} ! {msgStatus, noAcord, node(), Imsg}
+            end,
+            accordedTracker(L, Nodes, I, PId);
+
+        % Para las respuestas, seguimos como invariante que si la 
+        % lista de nodos esta vacia ya se encontro un resultado.
+
+        % Comportamiento al recibir una respuesta positiva de estado.
+        {msgStatus, acord, P, I} ->
+            case Nodes of
+                % Ya recibimos una respuesta valida para este I, ignoramos
+                [] -> 
+                    accordedTracker(L, Nodes, I, PId);
+                % En otro caso, esta es la primera respuesta. Devolvemos
+                _ ->
+                    PId ! {statusAcord, I, P},
+                    accordedTracker(L, [], I, PId)
+            end;
+        
+        % Comportamiento al recibir una respuesta negativa de estado.
+        {msgStatus, noAcord, Node, I} ->
+            case Nodes of
+                % Ya recibimos una respuesta valida para este I, ignoramos
+                [] -> 
+                    accordedTracker(L, Nodes, I, PId);
+                Nodes ->
+                    % Si es la ultima respuesta y no se encontro un valor
+                    % acordado, se devuelve el átomo correspondiente.
+                    Resto = lists:delete(Node, Nodes),
+                    case Resto of
+                        [] -> 
+                            PId ! statusNoAcord;
+                        _ -> 
+                            accordedTracker(L, Resto, I, PId)
+                    end
+            end;
+        
+        % En este caso, no se pudo matchear con el I actual. Esto esta para borrar la inbox del agente.
+        {msgStatus, _, _, _} ->
+            accordedTracker(L, Nodes, I, PId);
+
+        % Pedido de almacenar un nuevo mensaje acordado.
+        {storeAccorded, I, P} ->
+            accordedTracker(L ++ [{I, P}], Nodes, I, PId);
+
+        fin -> ok
+    after 
+        % Si algun nodo muere mientras se espera la respuesta, despues de un tiempo verificamos si estan vivos aun.
+        % Vale aclarar que va a haber un caso muy específico que llega a un estado de inconsistencia. Se desarrolla en el informe.
+        ?TIEMPO ->
+            accordedTracker(L, lists:filter(fun(Nodo) -> lists:member(Nodo, nodes()) end, Nodes), I, PId)  
+    end.
 % Lista encargada de almacenar los mensajes con sus
 % estados, actualizar los valores de prioridad de 
 % los mismos y devolver mensajes si es pedido. 
@@ -112,14 +185,13 @@ pqueue(L) ->
 
         % Actualiza el mensaje con un valor acordado. 
         {update, Msg, I, NA} -> 
-            case lists:keyfind(I, 2, L) of %! Ver que tan legal es esta linea. Sino reemplazar por '%?'.
+            accorded ! {storeAccorded, I, NA},
+            case lists:keyfind(I, 2, L) of
                 {_, _, _, NodeO, prov} -> 
                     pqueue(lists:keyreplace(I, 2, L, {Msg, I, NA, NodeO, acord}));
                 false -> 
                     pqueue(L)
             end;
-            %? {_, _, _, NodeO, prov} = lists:keyfind(I, 2, L),
-            %? pqueue(lists:keyreplace(I, 2, L, {Msg, I, NA, NodeO, acord}));
 
         % Si es posible, realiza un pop en la queue.
         {pop, Pid} ->
@@ -137,8 +209,7 @@ pqueue(L) ->
                             % Si el primer mensaje tiene valor acordado, lo devuelvo.
                             Pid ! First,
                             pqueue(lists:delete(First, Ord));
-                        {_,_,_,Node,prov} ->
-
+                        {Msg,I,_,Node,prov} ->
                             % Si el primer mensaje no tiene valor acordado, compruebo
                             % el estado de liveness del nodo emisor del mismo.
                             case lists:member(Node, nodes()) of
@@ -146,31 +217,32 @@ pqueue(L) ->
                                 true -> 
                                     self() ! {pop, Pid},
                                     pqueue(Ord);
-                                % Si esta muerto borro el mensaje de la queue. Fijarse si algun nodo de la red tiene el numero de orden acordado,
-                                % si lo tiene me lo da y se lo pongo. UwU
+                                % Para mantener las propiedades de "Validity" y "Uniform Agreement", si un mensaje
+                                % tiene estado provisorio y su emisor esta muerto, antes de eliminarlo se procede a
+                                % preguntarle al resto de los nodos de la red si alguno tiene el valor acordado para
+                                % el mensaje en cuaestión. Si lo posee, puedo actualizar el valor del mensaje. Si 
+                                % nadie posee este valor, significa que el nodo emisor nunca mando confirmación. Lo borro.
                                 false ->
-                                    self() ! {pop, Pid},
-                                    pqueue(lists:delete(First, Ord))
-                                %! Es posible arreglar el 3er caso si hacemos que antes de borrar el mensaje
-                                %! le preguntamos al resto de los nodos de la red el estado del mensaje.
-                                %! Si alguno responde con acordado devuelve el valor. Para esto tendriamos
-                                %! que implementar una queue que sea el historial de mensajes popeados.
-
-                                %! El problema de esto es que puede que el historial de mensajes popeados se vuelva 
-                                %! muuuy largo.
+                                    % Hacer un pequeño wait aca puede ayudar a que el número acordado le llegue primero a algun nodo de la red.
+                                    timer:sleep(?TIEMPO_A_ESPERAR),
+                                    accorded ! {computeStatus, self(), I},
+                                    receive
+                                        % Si algun nodo tiene un valor acordado se actualiza el mensaje con este valor.
+                                        {statusAcord, I, ValorFinal} ->
+                                            self() ! {update, Msg, I, ValorFinal},
+                                            self() ! {pop, Pid},
+                                            pqueue(Ord);
+                                        % Significa que nadie tiene el valor acordado para este mensaje por lo tanto se lo desestima.
+                                        statusNoAcord ->
+                                            self() ! {pop, Pid},
+                                            pqueue(lists:delete(First, Ord))
+                                    end
                             end
                     end
             end;
         fin -> ok
     end.
 
-%! Bug: Si un nodo manda un mensaje solicitando numeros de prioridad, y muere antes de que les pueda
-%! responder con el valor final, ese mensaje provisorio queda en la queue. Los nodos nunca van a seguir.
-%TODO Sobre esto hay que arreglar dos situaciones: 
-    %TODO -> El nodo emisor manda, muere antes de que lleguen respuestas. Todos tienen un mensaje provisorio.
-    %TODO -> El nodo emisor manda los valores finales. Mientra los manda muere. Algunos tiene valor acordado.
-
-%! Sigo buscando problemas.
 isisLoop (A, P, N) ->
     receive
         % Dado el identificador del nuevo mensaje y los 
@@ -203,11 +275,11 @@ isisLoop (A, P, N) ->
             queue ! {update, Msg, I, NA},
             lists:foreach(fun (X) ->
                           {loop, X} ! {updNA, Msg, I, NA} end,
-                          nodes()), % TODO Creo que arreglado: Problema. Tendriamos que hacer que si un nodo recibe una actualizacion, no se rompa si el mensaje no existe en su queue.
+                          nodes()),
             isisLoop(erlang:max(A, NA), P, N);
 
         % Actualiza el valor acordado en la queue.
-        {updNA, Msg, I, NA} -> %! Para arreglar el bug, puede ser necesario checkear si el que me mando el mensaje esta muerto. Si lo esta, reenvio a nodos. Si no lo esta, sigo normal.
+        {updNA, Msg, I, NA} ->
             queue ! {update, Msg, I, NA},
             isisLoop(erlang:max(A, NA), P, N);
         
